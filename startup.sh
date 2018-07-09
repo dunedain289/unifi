@@ -115,6 +115,13 @@ if [ ! -f /usr/share/misc/apt-upgraded ]; then
 fi
 
 # Simple installs first
+java8=$(dpkg-query -W --showformat='${Status}\n' openjdk-8-jre-headless 2>/dev/null)
+if [ "x${java8}" != "xinstall ok installed" ]; then 
+	if apt-get -qq install -y openjdk-8-jre-headless >/dev/null; then
+		echo "java8 installed"
+		update-java-alternatives --set java-1.8.0-openjdk-amd64
+	fi
+fi
 haveged=$(dpkg-query -W --showformat='${Status}\n' haveged 2>/dev/null)
 if [ "x${haveged}" != "xinstall ok installed" ]; then 
 	if apt-get -qq install -y haveged >/dev/null; then
