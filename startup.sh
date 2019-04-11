@@ -1,6 +1,6 @@
 #! /bin/sh
 
-# Version 1.0.3
+# Version 1.3.4
 # This is a startup script for UniFi Controller on Debian based Google Compute Engine instances.
 # For instructions and how-to:  https://metis.fi/en/2018/02/unifi-on-gcp/
 # For comments and code walkthrough:  https://metis.fi/en/2018/02/gcp-unifi-code/
@@ -82,16 +82,6 @@ fi
 
 ###########################################################
 #
-# Add Unifi to APT sources
-#
-if [ ! -f /etc/apt/trusted.gpg.d/unifi-repo.gpg ]; then
-	echo "deb http://www.ubnt.com/downloads/unifi/debian stable ubiquiti" > /etc/apt/sources.list.d/unifi.list
-	curl -Lfs -o /etc/apt/trusted.gpg.d/unifi-repo.gpg https://dl.ubnt.com/unifi/unifi-repo.gpg
-	echo "Unifi added to APT sources";
-fi
-
-###########################################################
-#
 # Add backports if it doesn't exist
 #
 release=$(lsb_release -a 2>/dev/null | grep "^Codename:" | cut -f 2)
@@ -107,21 +97,19 @@ fi
 #
 # Install stuff
 #
-if [ ! -f /usr/share/misc/apt-upgraded ]; then
+
+# Required preliminiaries
+if [ ! -f /usr/share/misc/apt-upgraded-1 ]; then
+	export APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=DontWarn    # For CGP packages
+	curl -Lfs https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -    # For CGP packages
 	apt-get -qq update -y >/dev/null
-	apt-get -qq upgrade -y >/dev/null
-	touch /usr/share/misc/apt-upgraded
+	DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y >/dev/null    # GRUB upgrades require special flags
+	rm /usr/share/misc/apt-upgraded    # Old flag file
+	touch /usr/share/misc/apt-upgraded-1
 	echo "System upgraded"
 fi
 
-# Simple installs first
-java8=$(dpkg-query -W --showformat='${Status}\n' openjdk-8-jre-headless 2>/dev/null)
-if [ "x${java8}" != "xinstall ok installed" ]; then 
-	if apt-get -qq install -y openjdk-8-jre-headless >/dev/null; then
-		echo "java8 installed"
-		update-java-alternatives --set java-1.8.0-openjdk-amd64
-	fi
-fi
+# HAVEGEd is straightforward
 haveged=$(dpkg-query -W --showformat='${Status}\n' haveged 2>/dev/null)
 if [ "x${haveged}" != "xinstall ok installed" ]; then 
 	if apt-get -qq install -y haveged >/dev/null; then
@@ -134,8 +122,18 @@ if (apt-get -qq install -y -t ${release}-backports certbot >/dev/null) || (apt-g
 		echo "CertBot installed"
 	fi
 fi
+
+# UniFi needs https support, custom repo and APT update first
+apt-get -qq install -y apt-transport-https >/dev/null
 unifi=$(dpkg-query -W --showformat='${Status}\n' unifi 2>/dev/null)
 if [ "x${unifi}" != "xinstall ok installed" ]; then
+	echo "deb http://www.ubnt.com/downloads/unifi/debian stable ubiquiti" > /etc/apt/sources.list.d/unifi.list
+	curl -Lfs -o /etc/apt/trusted.gpg.d/unifi-repo.gpg https://dl.ubnt.com/unifi/unifi-repo.gpg
+	apt-get -qq update -y >/dev/null
+	
+	if apt-get -qq install -y openjdk-8-jre-headless >/dev/null; then
+		echo "Java 8 installed"
+	fi
 	if apt-get -qq install -y unifi >/dev/null; then
 		echo "Unifi installed"
 	fi
@@ -253,7 +251,7 @@ if ! pgrep mongod; then
 		if [ -f /var/run/unifi/launcher.looping ]; then rm -f /var/run/unifi/launcher.looping; fi
 		echo >> $LOG
 		echo "Repairing Unifi DB on \$(date)" >> $LOG
-		su -c "/usr/bin/mongod --repair --dbpath /var/lib/unifi/db --logappend --logpath ${MONGOLOG} 2>>$LOG" unifi
+		su -c "/usr/bin/mongod --repair --dbpath /var/lib/unifi/db --smallfiles --logappend --logpath ${MONGOLOG} 2>>$LOG" unifi
 	fi
 else
 	echo "MongoDB is running. Exiting..."
@@ -326,7 +324,7 @@ fi
 #	 fi
 #	 message=" xms=${xms}"
 #	 
-#	 if [ "0${xmx}" -lt "${xms}" ]; then xmx=${xms}
+#	 if [ "0${xmx}" -lt "${xms}" ]; then xmx=${xms}; fi
 #	 if grep -e "^\s*unifi.xmx=[0-9]" /var/lib/unifi/system.properties >/dev/null; then
 #	 	sed -i -e "s/^[[:space:]]*unifi.xmx=[[:digit:]]\+/unifi.xmx=${xmx}/" /var/lib/unifi/system.properties
 #	 else
@@ -334,7 +332,7 @@ fi
 #	 fi
 #	 message="${message} xmx=${xmx}"
 #	 
-#	 if [ "${message}" ]; then
+#	 if [ -n "${message}" ]; then
 #	 	echo "Java heap set to:${message}"
 #	 fi
 #	 systemctl restart unifi
@@ -377,6 +375,25 @@ Ob8VZRzI9neWagqNdwvYkQsEjgfbKbYK7p2CNTUQ
 -----END CERTIFICATE-----
 _EOF
 fi
+
+# Write pre and post hooks to stop Lighttpd for the renewal
+if [ ! -d /etc/letsencrypt/renewal-hooks/pre ]; then
+	mkdir -p /etc/letsencrypt/renewal-hooks/pre
+fi
+cat > /etc/letsencrypt/renewal-hooks/pre/lighttpd <<_EOF
+#! /bin/sh
+systemctl stop lighttpd
+_EOF
+chmod a+x /etc/letsencrypt/renewal-hooks/pre/lighttpd
+
+if [ ! -d /etc/letsencrypt/renewal-hooks/post ]; then
+	mkdir -p /etc/letsencrypt/renewal-hooks/post
+fi
+cat > /etc/letsencrypt/renewal-hooks/post/lighttpd <<_EOF
+#! /bin/sh
+systemctl start lighttpd
+_EOF
+chmod a+x /etc/letsencrypt/renewal-hooks/post/lighttpd
 
 # Write the deploy hook to import the cert into Java
 if [ ! -d /etc/letsencrypt/renewal-hooks/deploy ]; then
